@@ -50,7 +50,8 @@ export default function HistoryScreen() {
     setLoading(true);
     setRefreshing(true);
     try {
-      const data = await apiRequest(`/rooms/code/${roomCode}/balances`);
+    const data = await apiRequest(`/rooms/code/${roomCode}/balances`);
+    console.log('balances payload:', JSON.stringify(data?.expenses ? data.expenses.slice(0,10) : data, null, 2));
       const expenses = Array.isArray(data?.expenses) ? data.expenses : [];
       const summaryMap = new Map();
 

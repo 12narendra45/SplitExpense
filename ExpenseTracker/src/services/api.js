@@ -1,6 +1,4 @@
-import { Platform } from 'react-native';
-
-const DEFAULT_API_URL = 'https://empwosztyicpczilbxcv.supabase.co/functions/v1';
+const DEFAULT_API_URL = 'https://split-expense-henna.vercel.app/api';
 
 const getBaseUrl = () => {
   return process.env.EXPO_PUBLIC_API_URL || DEFAULT_API_URL;

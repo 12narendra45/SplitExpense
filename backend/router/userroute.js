@@ -417,14 +417,37 @@ router.get('/rooms/code/:roomCode/balances', async (req, res) => {
 
     const memberUserIds = (roomMembers || []).map((member) => member.user_id).filter(Boolean);
     const memberEmails = (roomMembers || []).map((member) => member.email?.trim().toLowerCase()).filter(Boolean);
+
+    const { data: expenses, error: expensesError } = await supabase
+      .from(EXPENSES)
+      .select('*, expense_splits(*)')
+      .eq('room_id', roomData.id)
+      .order('created_at', { ascending: false });
+
+    if (expensesError) throw expensesError;
+
+    const expenseUserIds = new Set(memberUserIds);
+    const expenseEmails = new Set(memberEmails);
+
+    (expenses || []).forEach((expense) => {
+      if (expense.paid_by) {
+        expenseUserIds.add(expense.paid_by);
+      }
+      const splits = Array.isArray(expense.expense_splits) ? expense.expense_splits : [];
+      splits.forEach((split) => {
+        if (split.user_id) expenseUserIds.add(split.user_id);
+        if (split.email) expenseEmails.add(split.email.trim().toLowerCase());
+      });
+    });
+
     const profileById = new Map();
     const profileByEmail = new Map();
 
-    if (memberUserIds.length > 0) {
+    if (expenseUserIds.size > 0) {
       const { data: profileDataById, error: profileIdError } = await supabase
         .from(PROFILES)
         .select('id,name,email')
-        .in('id', memberUserIds);
+        .in('id', Array.from(expenseUserIds));
 
       if (profileIdError) throw profileIdError;
       (profileDataById || []).forEach((profile) => {
@@ -432,11 +455,11 @@ router.get('/rooms/code/:roomCode/balances', async (req, res) => {
       });
     }
 
-    if (memberEmails.length > 0) {
+    if (expenseEmails.size > 0) {
       const { data: profileDataByEmail, error: profileEmailError } = await supabase
         .from(PROFILES)
         .select('id,name,email')
-        .in('email', memberEmails);
+        .in('email', Array.from(expenseEmails));
 
       if (profileEmailError) throw profileEmailError;
       (profileDataByEmail || []).forEach((profile) => {
@@ -444,46 +467,29 @@ router.get('/rooms/code/:roomCode/balances', async (req, res) => {
       });
     }
 
-    const memberNameById = new Map();
-    const memberNameByEmail = new Map();
+    const getProfileName = (userId, email) => {
+      if (userId && profileById.has(userId)) return profileById.get(userId).name;
+      if (email) return profileByEmail.get(email.trim().toLowerCase())?.name || null;
+      return null;
+    };
 
-    (roomMembers || []).forEach((member) => {
-      const fallbackEmail = member.email?.trim().toLowerCase();
-      const idMatch = member.user_id ? profileById.get(member.user_id) : null;
-      const emailMatch = fallbackEmail ? profileByEmail.get(fallbackEmail) : null;
-      const displayName = idMatch?.name || emailMatch?.name || fallbackEmail || null;
-
-      if (member.user_id) memberNameById.set(member.user_id, displayName);
-      if (fallbackEmail) memberNameByEmail.set(fallbackEmail, displayName);
-    });
-
-    const { data, error } = await supabase
-      .from(EXPENSES)
-      .select('*, expense_splits(*)')
-      .eq('room_id', roomData.id)
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-
-    const expensesWithNames = (data || []).map((expense) => {
+    const expensesWithNames = (expenses || []).map((expense) => {
       const expenseSplits = (Array.isArray(expense.expense_splits) ? expense.expense_splits : []).map((split) => {
-        const splitEmail = split.email?.trim().toLowerCase();
-        const splitName = split.user_id
-          ? memberNameById.get(split.user_id) || (splitEmail ? memberNameByEmail.get(splitEmail) : null) || null
-          : (splitEmail ? memberNameByEmail.get(splitEmail) : null) || null;
+        const splitName = getProfileName(split.user_id, split.email);
+        const displayName = splitName || split.user_name || split.display_name || split.email || null;
 
         return {
           ...split,
           user_name: splitName || split.user_name || split.email || null,
-          display_name: splitName || split.display_name || split.email || null
+          display_name: displayName
         };
       });
 
-      const paidByName = expense.paid_by ? memberNameById.get(expense.paid_by) || null : null;
+      const paidByName = getProfileName(expense.paid_by, null);
 
       return {
         ...expense,
-        paid_by_name: paidByName || null,
+        paid_by_name: paidByName || expense.paid_by_name || null,
         expense_splits: expenseSplits
       };
     });
