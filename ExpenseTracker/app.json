@@ -11,11 +11,17 @@
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE"
-      }
+      },
+      "package": "com.narendra1903.splitjoy"
     },
     "plugins": [
       "expo-secure-store",
       "expo-font"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "79cfc74d-fb09-431a-8295-36aaa77e78aa"
+      }
+    }
   }
 }

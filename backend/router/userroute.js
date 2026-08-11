@@ -408,6 +408,55 @@ router.get('/rooms/code/:roomCode/balances', async (req, res) => {
       return res.status(404).json({ message: 'Room not found' });
     }
 
+    const { data: roomMembers, error: membersError } = await supabase
+      .from(ROOM_MEMBERS)
+      .select('user_id,email')
+      .eq('room_id', roomData.id);
+
+    if (membersError) throw membersError;
+
+    const memberUserIds = (roomMembers || []).map((member) => member.user_id).filter(Boolean);
+    const memberEmails = (roomMembers || []).map((member) => member.email?.trim().toLowerCase()).filter(Boolean);
+    const profileById = new Map();
+    const profileByEmail = new Map();
+
+    if (memberUserIds.length > 0) {
+      const { data: profileDataById, error: profileIdError } = await supabase
+        .from(PROFILES)
+        .select('id,name,email')
+        .in('id', memberUserIds);
+
+      if (profileIdError) throw profileIdError;
+      (profileDataById || []).forEach((profile) => {
+        profileById.set(profile.id, profile);
+      });
+    }
+
+    if (memberEmails.length > 0) {
+      const { data: profileDataByEmail, error: profileEmailError } = await supabase
+        .from(PROFILES)
+        .select('id,name,email')
+        .in('email', memberEmails);
+
+      if (profileEmailError) throw profileEmailError;
+      (profileDataByEmail || []).forEach((profile) => {
+        profileByEmail.set(profile.email?.toLowerCase(), profile);
+      });
+    }
+
+    const memberNameById = new Map();
+    const memberNameByEmail = new Map();
+
+    (roomMembers || []).forEach((member) => {
+      const fallbackEmail = member.email?.trim().toLowerCase();
+      const idMatch = member.user_id ? profileById.get(member.user_id) : null;
+      const emailMatch = fallbackEmail ? profileByEmail.get(fallbackEmail) : null;
+      const displayName = idMatch?.name || emailMatch?.name || fallbackEmail || null;
+
+      if (member.user_id) memberNameById.set(member.user_id, displayName);
+      if (fallbackEmail) memberNameByEmail.set(fallbackEmail, displayName);
+    });
+
     const { data, error } = await supabase
       .from(EXPENSES)
       .select('*, expense_splits(*)')
@@ -415,7 +464,31 @@ router.get('/rooms/code/:roomCode/balances', async (req, res) => {
       .order('created_at', { ascending: false });
 
     if (error) throw error;
-    res.json({ expenses: data || [] });
+
+    const expensesWithNames = (data || []).map((expense) => {
+      const expenseSplits = (Array.isArray(expense.expense_splits) ? expense.expense_splits : []).map((split) => {
+        const splitEmail = split.email?.trim().toLowerCase();
+        const splitName = split.user_id
+          ? memberNameById.get(split.user_id) || (splitEmail ? memberNameByEmail.get(splitEmail) : null) || null
+          : (splitEmail ? memberNameByEmail.get(splitEmail) : null) || null;
+
+        return {
+          ...split,
+          user_name: splitName || split.user_name || split.email || null,
+          display_name: splitName || split.display_name || split.email || null
+        };
+      });
+
+      const paidByName = expense.paid_by ? memberNameById.get(expense.paid_by) || null : null;
+
+      return {
+        ...expense,
+        paid_by_name: paidByName || null,
+        expense_splits: expenseSplits
+      };
+    });
+
+    res.json({ expenses: expensesWithNames });
   } catch (err) {
     res.status(500).json({ message: 'Failed to fetch balances', error: err.message });
   }

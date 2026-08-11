@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useLayoutEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView, Alert } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView, Alert, RefreshControl } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import * as SecureStore from 'expo-secure-store';
 import { apiRequest } from '../services/api';
@@ -7,6 +7,7 @@ import { apiRequest } from '../services/api';
 export default function DashboardScreen({ navigation, route }) {
   const [balances, setBalances] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [rooms, setRooms] = useState([]);
   const [activeRoom, setActiveRoom] = useState(null);
   const user = route?.params?.user || null;
@@ -105,28 +106,34 @@ export default function DashboardScreen({ navigation, route }) {
     }
   };
 
+  const refreshDashboard = React.useCallback(async () => {
+    setRefreshing(true);
+
+    try {
+      await loadRooms();
+
+      if (!roomCode) {
+        setBalances([]);
+        setLoading(false);
+        return;
+      }
+
+      setLoading(true);
+      const data = await apiRequest(`/rooms/code/${roomCode}/balances`);
+      setBalances(data.expenses || []);
+    } catch (error) {
+      console.log('Failed to refresh dashboard', error.message);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [roomCode, user]);
+
   useFocusEffect(
     React.useCallback(() => {
-      loadRooms();
-
-      (async () => {
-        if (!roomCode) {
-          setLoading(false);
-          return;
-        }
-        setLoading(true);
-        try {
-          const data = await apiRequest(`/rooms/code/${roomCode}/balances`);
-          setBalances(data.expenses || []);
-        } catch (error) {
-          console.log('Failed to refresh balances on focus', error.message);
-        } finally {
-          setLoading(false);
-        }
-      })();
-
+      refreshDashboard();
       return () => {};
-    }, [roomCode, user])
+    }, [refreshDashboard])
   );
 
   useEffect(() => {
@@ -154,7 +161,19 @@ export default function DashboardScreen({ navigation, route }) {
   }, [roomCode]);
 
   return (
-    <View style={styles.container}>
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={styles.contentContainer}
+      refreshControl={
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={refreshDashboard}
+          colors={['#a855f7']}
+          tintColor="#a855f7"
+        />
+      }
+      showsVerticalScrollIndicator={false}
+    >
       <View style={styles.heroCard}>
         <Text style={styles.title}>Room Expense Dashboard</Text>
         <Text style={styles.subtitle}>See your split balance and room activity</Text>
@@ -209,15 +228,18 @@ export default function DashboardScreen({ navigation, route }) {
       </View>
 
       {loading ? <ActivityIndicator size="large" color="#7c3aed" /> : null}
-    </View>
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: 24,
     backgroundColor: '#050505'
+  },
+  contentContainer: {
+    padding: 24,
+    paddingBottom: 40
   },
   heroCard: {
     backgroundColor: '#111111',

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, ScrollView, TouchableOpacity, Modal, Image } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator, ScrollView, TouchableOpacity, Modal, Image, RefreshControl } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import * as SecureStore from 'expo-secure-store';
 import { apiRequest } from '../services/api';
@@ -7,6 +7,7 @@ import { apiRequest } from '../services/api';
 export default function HistoryScreen() {
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [expensesList, setExpensesList] = useState([]);
   const [modalVisible, setModalVisible] = useState(false);
   const [selectedProof, setSelectedProof] = useState(null);
@@ -39,64 +40,110 @@ export default function HistoryScreen() {
     loadSession();
   }, []);
 
-  useFocusEffect(
-    React.useCallback(() => {
-      if (!roomCode) {
-        setLoading(false);
-        return;
-      }
+  const loadHistory = React.useCallback(async () => {
+    if (!roomCode) {
+      setLoading(false);
+      setRefreshing(false);
+      return;
+    }
 
-      const loadHistory = async () => {
-        setLoading(true);
-        try {
-          const data = await apiRequest(`/rooms/code/${roomCode}/balances`);
-          const expenses = Array.isArray(data?.expenses) ? data.expenses : [];
-          const summaryMap = new Map();
+    setLoading(true);
+    setRefreshing(true);
+    try {
+      const data = await apiRequest(`/rooms/code/${roomCode}/balances`);
+      const expenses = Array.isArray(data?.expenses) ? data.expenses : [];
+      const summaryMap = new Map();
 
-          expenses.forEach((expense) => {
-            const amount = Number(expense.amount || 0);
-            if (expense.paid_by) {
-              const existing = summaryMap.get(expense.paid_by) || { paid: 0, share: 0 };
-              summaryMap.set(expense.paid_by, { ...existing, paid: existing.paid + amount });
-            }
-
-            const splits = Array.isArray(expense.expense_splits) ? expense.expense_splits : [];
-            splits.forEach((split) => {
-              const key = split.user_id || `email:${split.email || ''}`;
-              if (!key) return;
-              const existing = summaryMap.get(key) || { paid: 0, share: 0 };
-              summaryMap.set(key, { ...existing, share: existing.share + Number(split.amount || 0) });
-            });
-          });
-
-          const rows = Array.from(summaryMap.entries()).map(([key, value]) => {
-            const label = key === currentUser?.id
-              ? 'You'
-              : key.startsWith('email:')
-                ? key.replace('email:', '')
-                : `User ${String(key).slice(0, 8)}`;
-
-            return {
-              key,
-              label,
-              paid: Number(value.paid || 0),
-              share: Number(value.share || 0),
-              net: Number(value.paid || 0) - Number(value.share || 0)
-            };
-          });
-
-          rows.sort((a, b) => b.net - a.net);
-          setHistory(rows);
-          setExpensesList(expenses);
-        } catch (error) {
-          console.log('Failed to load history', error.message);
-        } finally {
-          setLoading(false);
+      // Build a quick lookup of participant display names from the fetched expenses
+      // so we can replace raw ID fallbacks like "User 63567hvhj" with real names.
+      const personMap = new Map();
+      expenses.forEach((expense) => {
+        if (expense.paid_by && expense.paid_by_name) {
+          personMap.set(String(expense.paid_by), expense.paid_by_name);
         }
+        const splits = Array.isArray(expense.expense_splits) ? expense.expense_splits : [];
+        splits.forEach((s) => {
+          if (s.user_id && (s.user_name || s.display_name)) {
+            personMap.set(String(s.user_id), s.user_name || s.display_name);
+          }
+          if (s.email && !personMap.has(`email:${s.email}`)) {
+            personMap.set(`email:${s.email}`, s.user_name || s.display_name || s.email);
+          }
+        });
+      });
+
+      const addPersonEntry = (identity, label, amount, type) => {
+        const key = identity || label || 'unknown';
+        const existing = summaryMap.get(key) || { paid: 0, share: 0, label, identity };
+        if (type === 'paid') {
+          existing.paid += amount;
+        } else {
+          existing.share += amount;
+        }
+        summaryMap.set(key, existing);
       };
 
+      expenses.forEach((expense) => {
+        const amount = Number(expense.amount || 0);
+        const payerLabel = expense.paid_by_name
+          || (expense.paid_by === currentUser?.id ? 'You' : null)
+          || (expense.paid_by_email ? expense.paid_by_email : null)
+          || 'Unknown';
+
+        if (expense.paid_by) {
+          addPersonEntry(expense.paid_by, payerLabel, amount, 'paid');
+        }
+
+        const splits = Array.isArray(expense.expense_splits) ? expense.expense_splits : [];
+        splits.forEach((split) => {
+          const identity = split.user_id || split.email || `email:${split.email || ''}`;
+          const label = split.user_name
+            || split.display_name
+            || (split.user_id === currentUser?.id ? 'You' : null)
+            || split.email
+            || `User ${String(identity).slice(0, 8)}`;
+
+          if (!identity) return;
+          addPersonEntry(identity, label, Number(split.amount || 0), 'share');
+        });
+      });
+
+      const rows = Array.from(summaryMap.entries()).map(([key, value]) => {
+        let label = value.label === 'You' ? 'You' : value.label || `User ${String(key).slice(0, 8)}`;
+
+        // If label is a generated "User xxxx" fallback, try to find a nicer name
+        // from personMap (populated from expense payloads).
+        if (label.startsWith('User ')) {
+          const mapped = personMap.get(String(key)) || personMap.get(key) || null;
+          if (mapped) label = mapped === currentUser?.id ? 'You' : mapped;
+          else if (String(key).startsWith('email:')) label = String(key).replace('email:', '');
+        }
+
+        return {
+          key,
+          label,
+          paid: Number(value.paid || 0),
+          share: Number(value.share || 0),
+          net: Number(value.paid || 0) - Number(value.share || 0)
+        };
+      });
+
+      rows.sort((a, b) => b.net - a.net);
+      setHistory(rows);
+      setExpensesList(expenses);
+    } catch (error) {
+      console.log('Failed to load history', error.message);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  }, [roomCode, currentUser?.id]);
+
+  useFocusEffect(
+    React.useCallback(() => {
       loadHistory();
-    }, [roomCode, currentUser?.id])
+      return () => {};
+    }, [loadHistory])
   );
 
   return (
@@ -113,7 +160,17 @@ export default function HistoryScreen() {
       {loading ? (
         <ActivityIndicator size="large" color="#a855f7" />
       ) : (
-        <ScrollView showsVerticalScrollIndicator={false}>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={loadHistory}
+              colors={['#a855f7']}
+              tintColor="#a855f7"
+            />
+          }
+        >
           {history.length === 0 ? (
             <Text style={styles.emptyText}>No expenses yet for this room.</Text>
           ) : (
@@ -149,7 +206,7 @@ export default function HistoryScreen() {
               (() => {
                 const proofs = expensesList.filter(e => e.image_url);
                 const grouped = proofs.reduce((acc, e) => {
-                  const payer = e.paid_by_email || e.paid_by || 'Unknown';
+                  const payer = e.paid_by_name || e.paid_by_email || e.paid_by || 'Unknown';
                   if (!acc[payer]) acc[payer] = [];
                   acc[payer].push(e);
                   return acc;
